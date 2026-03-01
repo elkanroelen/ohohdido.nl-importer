@@ -447,8 +447,11 @@ def import_file():
         cursor.execute("SET SESSION foreign_key_checks = 0")
         cursor.execute("SET SESSION unique_checks = 0")
 
+        is_tty = sys.stderr.isatty()
+
         with open_input(path) as f:
-            progress = tqdm(f, unit=" rec", unit_scale=True, dynamic_ncols=True)
+            progress = tqdm(f, unit=" rec", unit_scale=True, dynamic_ncols=True,
+                            disable=not is_tty)
             for line in progress:
                 line = line.strip()
                 if not line:
@@ -473,7 +476,10 @@ def import_file():
                     if since_commit >= COMMIT_EVERY:
                         connection.commit()
                         since_commit = 0
-                        progress.set_postfix(committed=total)
+                        if is_tty:
+                            progress.set_postfix(committed=total)
+                        else:
+                            print(f"  {total:,} records verwerkt...", flush=True)
 
             if batch_rows:
                 flush_batch(cursor, batch_rows, batch_emails, batch_phones)

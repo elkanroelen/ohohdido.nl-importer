@@ -66,7 +66,7 @@ cp .env.example .env
 nano .env   # vul je echte waarden in
 
 # 3. Start de import (installeert deps automatisch, draait in achtergrond)
-docker run -d \
+docker run -d --rm \
   --name import_run \
   --network=host \
   --env-file .env \
