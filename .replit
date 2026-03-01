@@ -26,9 +26,9 @@ args = "Run Import"
 name = "Run Import"
 author = "agent"
 
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "python scripts/import_records.py"
-
 [workflows.workflow.metadata]
 outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "bash scripts/run_import.sh"
