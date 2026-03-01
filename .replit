@@ -22,6 +22,10 @@ author = "agent"
 task = "workflow.run"
 args = "Run Import"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "MySQL Server"
+
 [[workflows.workflow]]
 name = "Run Import"
 author = "agent"
@@ -32,3 +36,14 @@ outputType = "console"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "bash scripts/run_import.sh"
+
+[[workflows.workflow]]
+name = "MySQL Server"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "bash scripts/mysql_server.sh"
+
+[workflows.workflow.metadata]
+outputType = "console"

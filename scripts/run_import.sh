@@ -1,11 +1,20 @@
 #!/usr/bin/env bash
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+MYSQL_SOCKET="/tmp/mysql.sock"
 
-echo "=== Starting local MySQL ==="
-bash "$SCRIPT_DIR/start_mysql.sh"
+echo "Waiting for MySQL to be available..."
+for i in $(seq 1 30); do
+    if mysqladmin --socket="$MYSQL_SOCKET" ping --silent 2>/dev/null; then
+        echo "MySQL is up."
+        break
+    fi
+    if [ "$i" -eq 30 ]; then
+        echo "ERROR: MySQL did not become available. Start the MySQL Server workflow first."
+        exit 1
+    fi
+    sleep 1
+done
 
-echo ""
-echo "=== Running import ==="
-python "$SCRIPT_DIR/import_records.py"
+echo "Running import..."
+python "$(dirname "$0")/import_records.py"

@@ -4,56 +4,47 @@ set -e
 MYSQL_DATA_DIR="/home/runner/mysql_data"
 MYSQL_SOCKET="/tmp/mysql.sock"
 MYSQL_LOG="/tmp/mysql_error.log"
-SCHEMA_APPLIED_FLAG="$MYSQL_DATA_DIR/.schema_applied"
 
-if mysqladmin --socket="$MYSQL_SOCKET" ping --silent 2>/dev/null; then
-    echo "MySQL already running."
-    exit 0
-fi
-
-FIRST_INIT=false
 if [ ! -d "$MYSQL_DATA_DIR" ]; then
     echo "Initializing MySQL data directory..."
     mysqld --initialize-insecure --datadir="$MYSQL_DATA_DIR" 2>>"$MYSQL_LOG"
-    FIRST_INIT=true
     echo "Initialized."
+    touch "$MYSQL_DATA_DIR/.needs_schema"
 fi
 
-echo "Starting MySQL..."
-nohup mysqld \
+echo "Starting MySQL server (foreground)..."
+mysqld \
     --datadir="$MYSQL_DATA_DIR" \
     --socket="$MYSQL_SOCKET" \
     --pid-file=/tmp/mysql.pid \
     --port=3306 \
     --bind-address=127.0.0.1 \
     --mysqlx=OFF \
-    --log-error="$MYSQL_LOG" \
-    >> /tmp/mysql_stdout.log 2>&1 &
+    --log-error="$MYSQL_LOG" &
+
+MYSQLD_PID=$!
 
 for i in $(seq 1 30); do
     if mysqladmin --socket="$MYSQL_SOCKET" ping --silent 2>/dev/null; then
-        echo "MySQL is up."
+        echo "MySQL is up (pid $MYSQLD_PID)."
         break
     fi
     sleep 1
 done
 
-if [ "$FIRST_INIT" = true ]; then
-    echo "Creating database and user..."
+if [ -f "$MYSQL_DATA_DIR/.needs_schema" ]; then
+    echo "First-time setup: creating database, user, and schema..."
     mysql --socket="$MYSQL_SOCKET" -u root <<SQL
 CREATE DATABASE IF NOT EXISTS ${DB_NAME:-import_db} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS '${DB_USER:-importer}'@'127.0.0.1' IDENTIFIED WITH mysql_native_password BY '${DB_PASS:-importpass}';
 GRANT ALL PRIVILEGES ON ${DB_NAME:-import_db}.* TO '${DB_USER:-importer}'@'127.0.0.1';
 FLUSH PRIVILEGES;
 SQL
-
     SCHEMA_FILE="$(dirname "$0")/../initdb/001-extra.sql"
-    if [ -f "$SCHEMA_FILE" ]; then
-        echo "Applying schema..."
-        mysql --socket="$MYSQL_SOCKET" -u root "${DB_NAME:-import_db}" < "$SCHEMA_FILE"
-        touch "$SCHEMA_APPLIED_FLAG"
-        echo "Schema applied."
-    fi
+    mysql --socket="$MYSQL_SOCKET" -u root "${DB_NAME:-import_db}" < "$SCHEMA_FILE"
+    rm "$MYSQL_DATA_DIR/.needs_schema"
+    echo "Schema applied."
 fi
 
-echo "MySQL setup complete."
+echo "MySQL ready. Waiting..."
+wait $MYSQLD_PID
