@@ -500,15 +500,53 @@ def import_file():
         cursor.execute("SET SESSION foreign_key_checks = 1")
         cursor.execute("SET SESSION unique_checks = 1")
 
-        cursor.execute("""
-            INSERT INTO metadata (`key`, value)
-            VALUES ('last_update', CURDATE())
-            ON DUPLICATE KEY UPDATE value = CURDATE()
-        """)
+        elapsed_sec = (datetime.now() - start_time).total_seconds()
+        rate = int(total / elapsed_sec) if elapsed_sec > 0 else 0
+
+        cursor.execute("SELECT COUNT(*) AS n FROM accounts")
+        n_accounts = cursor.fetchone()["n"]
+
+        cursor.execute("SELECT COUNT(*) AS n FROM account_emails")
+        n_emails = cursor.fetchone()["n"]
+
+        cursor.execute("SELECT COUNT(*) AS n FROM account_phones")
+        n_phones = cursor.fetchone()["n"]
+
+        cursor.execute("SELECT COUNT(*) AS n FROM accounts WHERE is_active = 1")
+        n_active = cursor.fetchone()["n"]
+
+        cursor.execute("SELECT COUNT(*) AS n FROM accounts WHERE is_deleted = 1")
+        n_deleted = cursor.fetchone()["n"]
+
+        stats = [
+            ("last_update",          str(datetime.now().date())),
+            ("total_accounts",       str(n_accounts)),
+            ("total_emails",         str(n_emails)),
+            ("total_phones",         str(n_phones)),
+            ("total_active",         str(n_active)),
+            ("total_deleted",        str(n_deleted)),
+            ("last_import_count",    str(total)),
+            ("last_import_duration", f"{int(elapsed_sec//60)}m{int(elapsed_sec%60):02d}s"),
+            ("last_import_rate",     f"{rate} rec/s"),
+        ]
+
+        cursor.executemany("""
+            INSERT INTO metadata (`key`, value) VALUES (%s, %s)
+            ON DUPLICATE KEY UPDATE value = VALUES(value)
+        """, stats)
+
         connection.commit()
 
     connection.close()
+
     print(f"\nDONE. Total processed: {total}")
+    print(f"  Duur:            {int(elapsed_sec//60)}m{int(elapsed_sec%60):02d}s")
+    print(f"  Gemiddeld:       {rate:,} rec/s")
+    print(f"  Totaal accounts: {n_accounts:,}")
+    print(f"  Totaal emails:   {n_emails:,}")
+    print(f"  Totaal telefoons:{n_phones:,}")
+    print(f"  Actief:          {n_active:,}")
+    print(f"  Verwijderd:      {n_deleted:,}")
 
 if __name__ == "__main__":
     import_file()
