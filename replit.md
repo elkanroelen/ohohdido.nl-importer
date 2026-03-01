@@ -54,6 +54,8 @@ Supports both plain `.jsonl` and gzipped `.jsonl.gz` files via `INPUT_PATH`.
 
 De import draait het snelst als de container op dezelfde server staat als MySQL (geen netwerk-latency). De container blijft ook draaien als de SSH-verbinding wegvalt.
 
+Geen custom image bouwen nodig — gebruik de standaard `python:3.12` image:
+
 ```bash
 # 1. Clone de repo op de server
 git clone https://github.com/elkanroelen/ohohdido.nl-importer.git
@@ -63,21 +65,21 @@ cd ohohdido.nl-importer
 cp .env.example .env
 nano .env   # vul je echte waarden in
 
-# 3. Bouw de Docker image
-docker build -t importer .
-
-# 4. Start de import in de achtergrond (-d = detached, overleeft SSH-disconnect)
+# 3. Start de import (installeert deps automatisch, draait in achtergrond)
 docker run -d \
   --name import_run \
-  --network=host \              # zodat container bij MySQL op localhost kan
+  --network=host \
   --env-file .env \
-  -v /pad/naar/data:/data \     # mount de map met je .7z of .jsonl bestand
-  importer
+  -v $(pwd):/app \
+  -v /pad/naar/data:/data \
+  -w /app \
+  python:3.12 \
+  bash -c "apt-get update -qq && apt-get install -y -qq p7zip-full && pip install -q -r requirements.txt && python scripts/import_records.py"
 
-# 5. Voortgang volgen (vanuit een nieuwe SSH-sessie)
+# 4. Voortgang volgen (ook vanuit een nieuwe SSH-sessie)
 docker logs -f import_run
 
-# 6. Klaar? Container opruimen
+# 5. Klaar? Container opruimen
 docker rm import_run
 ```
 
