@@ -438,6 +438,8 @@ def import_file():
     connection = pymysql.connect(**DB_CONFIG)
     total = 0
     since_commit = 0
+    start_time = datetime.now()
+    last_print_total = 0
 
     batch_rows = []
     batch_emails = {}
@@ -479,7 +481,17 @@ def import_file():
                         if is_tty:
                             progress.set_postfix(committed=total)
                         else:
-                            print(f"  {total:,} records verwerkt...", flush=True)
+                            elapsed = (datetime.now() - start_time).total_seconds()
+                            rate = total / elapsed if elapsed > 0 else 0
+                            chunk = total - last_print_total
+                            last_print_total = total
+                            print(
+                                f"  {total:>10,} rec  |  "
+                                f"{rate:>8,.0f} rec/s  |  "
+                                f"elapsed {int(elapsed//60)}m{int(elapsed%60):02d}s  |  "
+                                f"+{chunk:,} deze batch",
+                                flush=True
+                            )
 
             if batch_rows:
                 flush_batch(cursor, batch_rows, batch_emails, batch_phones)
