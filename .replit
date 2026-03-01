@@ -4,3 +4,31 @@ expertMode = true
 
 [nix]
 channel = "stable-25_05"
+packages = ["mysql80"]
+
+[userenv]
+
+[userenv.shared]
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Run Import"
+
+[[workflows.workflow]]
+name = "Run Import"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python scripts/import_records.py"
+
+[workflows.workflow.metadata]
+outputType = "console"
