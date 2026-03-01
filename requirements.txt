@@ -1,3 +1,6 @@
 pymysql
 tqdm
 python-dotenv
+pymysql
+python-dotenv
+tqdm
