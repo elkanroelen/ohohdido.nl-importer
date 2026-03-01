@@ -1,0 +1,6 @@
+data
+.env
+venv
+secrets.txt
+docker-compose-testdb.yml
+.idea
