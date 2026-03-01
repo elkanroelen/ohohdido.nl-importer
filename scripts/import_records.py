@@ -504,19 +504,19 @@ def import_file():
         rate = int(total / elapsed_sec) if elapsed_sec > 0 else 0
 
         cursor.execute("SELECT COUNT(*) AS n FROM accounts")
-        n_accounts = cursor.fetchone()["n"]
+        n_accounts = (cursor.fetchone() or {}).get("n", 0)
 
         cursor.execute("SELECT COUNT(*) AS n FROM account_emails")
-        n_emails = cursor.fetchone()["n"]
+        n_emails = (cursor.fetchone() or {}).get("n", 0)
 
         cursor.execute("SELECT COUNT(*) AS n FROM account_phones")
-        n_phones = cursor.fetchone()["n"]
+        n_phones = (cursor.fetchone() or {}).get("n", 0)
 
         cursor.execute("SELECT COUNT(*) AS n FROM accounts WHERE is_active = 1")
-        n_active = cursor.fetchone()["n"]
+        n_active = (cursor.fetchone() or {}).get("n", 0)
 
         cursor.execute("SELECT COUNT(*) AS n FROM accounts WHERE is_deleted = 1")
-        n_deleted = cursor.fetchone()["n"]
+        n_deleted = (cursor.fetchone() or {}).get("n", 0)
 
         stats = [
             ("last_update",          str(datetime.now().date())),
