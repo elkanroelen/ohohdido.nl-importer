@@ -1,11 +1,14 @@
 import os
+import sys
 import json
 import re
+import gzip
 import hashlib
 import hmac
 import pymysql
 from datetime import datetime
 from dotenv import load_dotenv
+from tqdm import tqdm
 
 # =========================
 # Load .env
@@ -236,186 +239,226 @@ def get_phone_candidates(obj, log_text, flash_text):
 # Import logic
 # =========================
 
+BATCH_SIZE = int(os.getenv("IMPORT_BATCH_SIZE", "2000"))
+COMMIT_EVERY = int(os.getenv("IMPORT_COMMIT_EVERY", "10000"))
+
+ACCOUNT_SQL = """
+INSERT INTO accounts (
+    sf_id,
+    name, type, segment, status,
+    is_active, is_deleted,
+    email, iban, phone,
+    billing_street, billing_city, billing_state,
+    billing_postcode, billing_country,
+    house_number, house_number_ext,
+    billing_address_hash,
+    last_activity_date, flash_message,
+    contact_moment_count,
+    contact_first_at,
+    contact_last_at,
+    contact_dates_json
+) VALUES (
+    %(sf_id)s,
+    %(name)s, %(type)s, %(segment)s, %(status)s,
+    %(is_active)s, %(is_deleted)s,
+    %(email)s, %(iban)s, %(phone)s,
+    %(billing_street)s, %(billing_city)s, %(billing_state)s,
+    %(billing_postcode)s, %(billing_country)s,
+    %(house_number)s, %(house_number_ext)s,
+    %(billing_address_hash)s,
+    %(last_activity_date)s, %(flash_message)s,
+    %(contact_moment_count)s,
+    %(contact_first_at)s,
+    %(contact_last_at)s,
+    %(contact_dates_json)s
+)
+ON DUPLICATE KEY UPDATE
+  name = VALUES(name),
+  type = VALUES(type),
+  segment = VALUES(segment),
+  status = VALUES(status),
+  is_active = VALUES(is_active),
+  is_deleted = VALUES(is_deleted),
+  email = VALUES(email),
+  iban = VALUES(iban),
+  phone = VALUES(phone),
+  billing_street = VALUES(billing_street),
+  billing_city = VALUES(billing_city),
+  billing_state = VALUES(billing_state),
+  billing_postcode = VALUES(billing_postcode),
+  billing_country = VALUES(billing_country),
+  house_number = VALUES(house_number),
+  house_number_ext = VALUES(house_number_ext),
+  billing_address_hash = VALUES(billing_address_hash),
+  last_activity_date = VALUES(last_activity_date),
+  flash_message = VALUES(flash_message),
+  contact_moment_count = VALUES(contact_moment_count),
+  contact_first_at = VALUES(contact_first_at),
+  contact_last_at = VALUES(contact_last_at),
+  contact_dates_json = VALUES(contact_dates_json)
+"""
+
+
+def process_record(obj):
+    log_text = obj.get("SObjectLog__c") or ""
+    flash_text = obj.get("Flash_Message__c") or ""
+
+    email_norms = get_email_candidates(obj, log_text, flash_text)
+    phone_norms = get_phone_candidates(obj, log_text, flash_text)
+
+    email_hashes = [hmac_hash(e) for e in email_norms]
+    phone_hashes = [hmac_hash(p) for p in phone_norms]
+
+    billing_postcode_raw = obj.get("BillingPostalCode")
+    house_number_raw = obj.get("House_Number__c")
+    house_number_ext_raw = obj.get("House_Number_Extension__c")
+
+    contact_count, contact_first, contact_last, contact_json = parse_contacts(
+        obj.get("SObjectLog__c")
+    )
+
+    row = {
+        "sf_id": obj.get("Id"),
+        "name": hmac_hash(normalize_name(obj.get("Name"))),
+        "type": obj.get("Type"),
+        "segment": obj.get("Segment__c") or obj.get("Segment"),
+        "status": obj.get("vlocity_cmt__Status__c"),
+        "is_active": 1 if obj.get("IsActive") == "true" else 0,
+        "is_deleted": 1 if obj.get("IsDeleted") == "true" else 0,
+        "email": email_hashes[0] if email_hashes else None,
+        "iban": hmac_hash(normalize_iban(obj.get("Bank_Account_Number__c"))),
+        "phone": phone_hashes[0] if phone_hashes else None,
+        "billing_street": hmac_hash(normalize_generic(obj.get("BillingStreet"))),
+        "billing_city": hmac_hash(normalize_generic(obj.get("BillingCity"))),
+        "billing_state": hmac_hash(normalize_generic(obj.get("BillingState"))),
+        "billing_postcode": hmac_hash(normalize_postcode(billing_postcode_raw)),
+        "billing_country": hmac_hash(normalize_generic(obj.get("BillingCountry"))),
+        "house_number": hmac_hash(normalize_generic(house_number_raw)),
+        "house_number_ext": hmac_hash(normalize_generic(house_number_ext_raw)),
+        "billing_address_hash": hmac_hash(normalize_address(
+            billing_postcode_raw, house_number_raw, house_number_ext_raw
+        )),
+        "last_activity_date": normalize_date(obj.get("LastActivityDate")),
+        "flash_message": obj.get("Flash_Message__c"),
+        "contact_moment_count": contact_count,
+        "contact_first_at": contact_first,
+        "contact_last_at": contact_last,
+        "contact_dates_json": contact_json,
+    }
+    return row, email_hashes, phone_hashes
+
+
+def flush_batch(cursor, batch_rows, batch_emails, batch_phones):
+    if not batch_rows:
+        return
+
+    cursor.executemany(ACCOUNT_SQL, batch_rows)
+
+    sf_ids = [r["sf_id"] for r in batch_rows]
+    placeholders = ",".join(["%s"] * len(sf_ids))
+    cursor.execute(
+        f"SELECT id, sf_id FROM accounts WHERE sf_id IN ({placeholders})",
+        sf_ids
+    )
+    id_map = {row["sf_id"]: row["id"] for row in cursor.fetchall()}
+
+    account_ids = list(id_map.values())
+    if account_ids:
+        id_placeholders = ",".join(["%s"] * len(account_ids))
+        cursor.execute(f"DELETE FROM account_emails WHERE account_id IN ({id_placeholders})", account_ids)
+        cursor.execute(f"DELETE FROM account_phones WHERE account_id IN ({id_placeholders})", account_ids)
+
+    email_rows = []
+    phone_rows = []
+    for sf_id, hashes in batch_emails.items():
+        acc_id = id_map.get(sf_id)
+        if acc_id:
+            email_rows.extend((acc_id, h) for h in hashes)
+    for sf_id, hashes in batch_phones.items():
+        acc_id = id_map.get(sf_id)
+        if acc_id:
+            phone_rows.extend((acc_id, h) for h in hashes)
+
+    if email_rows:
+        cursor.executemany(
+            "INSERT IGNORE INTO account_emails (account_id, email_hash) VALUES (%s, %s)",
+            email_rows
+        )
+    if phone_rows:
+        cursor.executemany(
+            "INSERT IGNORE INTO account_phones (account_id, phone_hash) VALUES (%s, %s)",
+            phone_rows
+        )
+
+
+def open_input(path):
+    if path.endswith(".gz"):
+        return gzip.open(path, "rt", encoding="utf-8")
+    return open(path, "r", encoding="utf-8")
+
+
 def import_file():
-    connection = pymysql.connect(**DB_CONFIG)
     path = os.getenv("INPUT_PATH")
-    count = 0
-    speed_count = 0
+    if not path:
+        print("ERROR: INPUT_PATH not set.", file=sys.stderr)
+        sys.exit(1)
+
+    connection = pymysql.connect(**DB_CONFIG)
+    total = 0
+    since_commit = 0
+
+    batch_rows = []
+    batch_emails = {}
+    batch_phones = {}
 
     with connection.cursor() as cursor:
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
+        cursor.execute("SET SESSION foreign_key_checks = 0")
+        cursor.execute("SET SESSION unique_checks = 0")
+
+        with open_input(path) as f:
+            progress = tqdm(f, unit=" rec", unit_scale=True, dynamic_ncols=True)
+            for line in progress:
+                line = line.strip()
+                if not line:
+                    continue
                 obj = json.loads(line)
+                row, email_hashes, phone_hashes = process_record(obj)
 
-                name = hmac_hash(normalize_name(obj.get("Name")))
-
-                log_text = obj.get("SObjectLog__c") or ""
-                flash_text = obj.get("Flash_Message__c") or ""
-
-                email_norms = get_email_candidates(obj, log_text, flash_text)
-                phone_norms = get_phone_candidates(obj, log_text, flash_text)
-
-                email_hashes = [hmac_hash(e) for e in email_norms]  # e is al genormaliseerd
-                phone_hashes = [hmac_hash(p) for p in phone_norms]  # p is al genormaliseerd
-
-                email = email_hashes[0] if email_hashes else None
-                phone = phone_hashes[0] if phone_hashes else None
-
-                iban = hmac_hash(normalize_iban(obj.get("Bank_Account_Number__c")))
-
-                billing_street = hmac_hash(normalize_generic(obj.get("BillingStreet")))
-                billing_city = hmac_hash(normalize_generic(obj.get("BillingCity")))
-                billing_state = hmac_hash(normalize_generic(obj.get("BillingState")))
-                billing_postcode_raw = obj.get("BillingPostalCode")
-                billing_postcode = hmac_hash(normalize_postcode(billing_postcode_raw))
-                billing_country = hmac_hash(normalize_generic(obj.get("BillingCountry")))
-
-                house_number_raw = obj.get("House_Number__c")
-                house_number_ext_raw = obj.get("House_Number_Extension__c")
-
-                house_number = hmac_hash(normalize_generic(house_number_raw))
-                house_number_ext = hmac_hash(normalize_generic(house_number_ext_raw))
-
-                combined = normalize_address(
-                    billing_postcode_raw,
-                    house_number_raw,
-                    house_number_ext_raw
-                )
-                billing_address_hash = hmac_hash(combined)
-
-                contact_count, contact_first, contact_last, contact_json = parse_contacts(
-                    obj.get("SObjectLog__c")
-                )
-
-                sql = """
-                INSERT INTO accounts (
-                    sf_id,
-                    name, type, segment, status,
-                    is_active, is_deleted,
-                    email, iban, phone,
-                    billing_street, billing_city, billing_state,
-                    billing_postcode, billing_country,
-                    house_number, house_number_ext,
-                    billing_address_hash,
-                    last_activity_date, flash_message,
-                    contact_moment_count,
-                    contact_first_at,
-                    contact_last_at,
-                    contact_dates_json
-                )
-                VALUES (
-                    %(sf_id)s,
-                    %(name)s, %(type)s, %(segment)s, %(status)s,
-                    %(is_active)s, %(is_deleted)s,
-                    %(email)s, %(iban)s, %(phone)s,
-                    %(billing_street)s, %(billing_city)s, %(billing_state)s,
-                    %(billing_postcode)s, %(billing_country)s,
-                    %(house_number)s, %(house_number_ext)s,
-                    %(billing_address_hash)s,
-                    %(last_activity_date)s, %(flash_message)s,
-                    %(contact_moment_count)s,
-                    %(contact_first_at)s,
-                    %(contact_last_at)s,
-                    %(contact_dates_json)s
-                )
-                ON DUPLICATE KEY UPDATE
-                  id = LAST_INSERT_ID(id),
-                  name = VALUES(name),
-                  type = VALUES(type),
-                  segment = VALUES(segment),
-                  status = VALUES(status),
-                  is_active = VALUES(is_active),
-                  is_deleted = VALUES(is_deleted),
-                  email = VALUES(email),
-                  iban = VALUES(iban),
-                  phone = VALUES(phone),
-                  billing_street = VALUES(billing_street),
-                  billing_city = VALUES(billing_city),
-                  billing_state = VALUES(billing_state),
-                  billing_postcode = VALUES(billing_postcode),
-                  billing_country = VALUES(billing_country),
-                  house_number = VALUES(house_number),
-                  house_number_ext = VALUES(house_number_ext),
-                  billing_address_hash = VALUES(billing_address_hash),
-                  last_activity_date = VALUES(last_activity_date),
-                  flash_message = VALUES(flash_message),
-                  contact_moment_count = VALUES(contact_moment_count),
-                  contact_first_at = VALUES(contact_first_at),
-                  contact_last_at = VALUES(contact_last_at),
-                  contact_dates_json = VALUES(contact_dates_json)
-                """
-
-                cursor.execute(sql, {
-                    "sf_id": obj.get("Id"),
-                    "name": name,
-                    "type": obj.get("Type"),
-                    "segment": obj.get("Segment__c") or obj.get("Segment"),
-                    "status": obj.get("vlocity_cmt__Status__c"),
-                    "is_active": 1 if obj.get("IsActive") == "true" else 0,
-                    "is_deleted": 1 if obj.get("IsDeleted") == "true" else 0,
-                    "email": email,
-                    "iban": iban,
-                    "phone": phone,
-                    "billing_street": billing_street,
-                    "billing_city": billing_city,
-                    "billing_state": billing_state,
-                    "billing_postcode": billing_postcode,
-                    "billing_country": billing_country,
-                    "house_number": house_number,
-                    "house_number_ext": house_number_ext,
-                    "billing_address_hash": billing_address_hash,
-                    "last_activity_date": normalize_date(obj.get("LastActivityDate")),
-                    "flash_message": obj.get("Flash_Message__c"),
-                    "contact_moment_count": contact_count,
-                    "contact_first_at": contact_first,
-                    "contact_last_at": contact_last,
-                    "contact_dates_json": contact_json
-                })
-                account_id = cursor.lastrowid
-
-                # -------------------------
-                # Sync emails and phone (exact match met nieuwe set)
-                # -------------------------
-                # Emails: wipe & reinsert
-                cursor.execute("DELETE FROM account_emails WHERE account_id=%s", (account_id,))
+                batch_rows.append(row)
                 if email_hashes:
-                    cursor.executemany(
-                        "INSERT IGNORE INTO account_emails (account_id, email_hash) VALUES (%s, %s)",
-                        [(account_id, h) for h in email_hashes],
-                    )
-
-                # Phones: wipe & reinsert
-                cursor.execute("DELETE FROM account_phones WHERE account_id=%s", (account_id,))
+                    batch_emails[row["sf_id"]] = email_hashes
                 if phone_hashes:
-                    cursor.executemany(
-                        "INSERT IGNORE INTO account_phones (account_id, phone_hash) VALUES (%s, %s)",
-                        [(account_id, h) for h in phone_hashes],
-                    )
+                    batch_phones[row["sf_id"]] = phone_hashes
 
-                count += 1
-                speed_count += 1
+                if len(batch_rows) >= BATCH_SIZE:
+                    flush_batch(cursor, batch_rows, batch_emails, batch_phones)
+                    total += len(batch_rows)
+                    since_commit += len(batch_rows)
+                    batch_rows = []
+                    batch_emails = {}
+                    batch_phones = {}
 
-                if speed_count >= 500:
-                    speed_count = 0
-                    connection.commit()
-                    print(f"Reached {count} new records... Still going strong...")
+                    if since_commit >= COMMIT_EVERY:
+                        connection.commit()
+                        since_commit = 0
+                        progress.set_postfix(committed=total)
 
-                # MAX_RECORDS = 10000
-                # if count >= MAX_RECORDS:
-                #     print(f"Reached limit of {MAX_RECORDS}, stopping import.")
-                #     break
+            if batch_rows:
+                flush_batch(cursor, batch_rows, batch_emails, batch_phones)
+                total += len(batch_rows)
 
-        update_sql = """
-           INSERT INTO metadata (`key`, value)
-           VALUES ('last_update', CURDATE()) ON DUPLICATE KEY
-           UPDATE value = CURDATE()
-           """
-        cursor.execute(update_sql)
+        cursor.execute("SET SESSION foreign_key_checks = 1")
+        cursor.execute("SET SESSION unique_checks = 1")
 
+        cursor.execute("""
+            INSERT INTO metadata (`key`, value)
+            VALUES ('last_update', CURDATE())
+            ON DUPLICATE KEY UPDATE value = CURDATE()
+        """)
         connection.commit()
-        print(f"\nDONE. Total processed: {count}")
 
     connection.close()
+    print(f"\nDONE. Total processed: {total}")
 
 if __name__ == "__main__":
     import_file()

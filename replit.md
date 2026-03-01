@@ -6,9 +6,9 @@ A Python script that imports Salesforce account records from a JSONL file into a
 
 ```
 scripts/
-  import_records.py   # Main import script
-  run_import.sh       # Entry point: starts MySQL, then runs the import
-  start_mysql.sh      # Initializes and starts a local MySQL server
+  import_records.py   # Main import script (batch-optimized)
+  run_import.sh       # Entry point: waits for MySQL, then runs the import
+  mysql_server.sh     # Initializes and keeps a local MySQL server running
 initdb/
   001-extra.sql       # Database schema (tables: accounts, account_emails, account_phones, search_logs, metadata)
 requirements.txt      # Python dependencies: pymysql, tqdm, python-dotenv
@@ -16,8 +16,9 @@ requirements.txt      # Python dependencies: pymysql, tqdm, python-dotenv
 
 ## How It Works
 
-1. `run_import.sh` starts a local MySQL server (if not already running) and applies the schema
-2. `import_records.py` reads a JSONL file line by line, normalizes and HMAC-hashes PII fields, then upserts records into MySQL
+1. **MySQL Server** workflow keeps a local MySQL instance running persistently
+2. **Run Import** workflow waits for MySQL to be ready, then runs the import
+3. `import_records.py` reads a JSONL (or .gz) file in batches of 2000, normalizes and HMAC-hashes PII fields, then upserts records into MySQL
 
 ## Required Secrets
 
@@ -29,15 +30,33 @@ requirements.txt      # Python dependencies: pymysql, tqdm, python-dotenv
 | `DB_PASS` | MySQL password |
 | `DB_NAME` | MySQL database name |
 | `HASH_PEPPER` | Secret pepper for HMAC-SHA256 hashing of PII |
-| `INPUT_PATH` | Full path to the JSONL input file |
+| `INPUT_PATH` | Full path to the JSONL or .gz input file |
+
+## Optional Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `IMPORT_BATCH_SIZE` | 2000 | Records per batch insert |
+| `IMPORT_COMMIT_EVERY` | 10000 | Records between MySQL commits |
+| `HASH_ENABLED` | true | Set to false to store PII unhashed |
 
 ## Running the Import
 
-Use the **Run Import** workflow, or manually:
+Start **MySQL Server** workflow first, then run **Run Import**. Or manually:
 
 ```bash
 bash scripts/run_import.sh
 ```
+
+Supports both plain `.jsonl` and gzipped `.jsonl.gz` files via `INPUT_PATH`.
+
+## Performance
+
+- Batch inserts (2000 records/batch) instead of row-by-row
+- FK + unique checks disabled during import for speed
+- Commits every 10,000 records
+- tqdm progress bar showing records/second
+- Gzip files read directly without decompression step
 
 ## Database Tables
 
