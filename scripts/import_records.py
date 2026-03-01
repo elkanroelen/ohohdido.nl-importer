@@ -1,8 +1,10 @@
 import os
 import sys
+import io
 import json
 import re
 import gzip
+import subprocess
 import hashlib
 import hmac
 import pymysql
@@ -391,9 +393,39 @@ def flush_batch(cursor, batch_rows, batch_emails, batch_phones):
         )
 
 
+class _SevenZStream:
+    """Streams a single-file 7z archive line by line without decompressing to disk."""
+    def __init__(self, path):
+        for cmd in (["7z", "e", "-so", path], ["7za", "e", "-so", path]):
+            try:
+                self._proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+                self._wrapper = io.TextIOWrapper(self._proc.stdout, encoding="utf-8")
+                return
+            except FileNotFoundError:
+                continue
+        raise RuntimeError(
+            "7z / 7za niet gevonden. Installeer p7zip:\n"
+            "  Mac:   brew install p7zip\n"
+            "  Linux: sudo apt install p7zip-full"
+        )
+
+    def __enter__(self):
+        return self._wrapper
+
+    def __exit__(self, *args):
+        self._wrapper.close()
+        self._proc.wait()
+
+
 def open_input(path):
     if path.endswith(".gz"):
         return gzip.open(path, "rt", encoding="utf-8")
+    if path.endswith(".7z"):
+        return _SevenZStream(path)
     return open(path, "r", encoding="utf-8")
 
 
