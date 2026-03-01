@@ -50,6 +50,39 @@ bash scripts/run_import.sh
 
 Supports both plain `.jsonl` and gzipped `.jsonl.gz` files via `INPUT_PATH`.
 
+## Draaien via Docker op de server (aanbevolen voor grote imports)
+
+De import draait het snelst als de container op dezelfde server staat als MySQL (geen netwerk-latency). De container blijft ook draaien als de SSH-verbinding wegvalt.
+
+```bash
+# 1. Clone de repo op de server
+git clone https://github.com/elkanroelen/ohohdido.nl-importer.git
+cd ohohdido.nl-importer
+
+# 2. Maak een .env bestand (zie .env.example)
+cp .env.example .env
+nano .env   # vul je echte waarden in
+
+# 3. Bouw de Docker image
+docker build -t importer .
+
+# 4. Start de import in de achtergrond (-d = detached, overleeft SSH-disconnect)
+docker run -d \
+  --name import_run \
+  --network=host \              # zodat container bij MySQL op localhost kan
+  --env-file .env \
+  -v /pad/naar/data:/data \     # mount de map met je .7z of .jsonl bestand
+  importer
+
+# 5. Voortgang volgen (vanuit een nieuwe SSH-sessie)
+docker logs -f import_run
+
+# 6. Klaar? Container opruimen
+docker rm import_run
+```
+
+> **Let op `--network=host`:** als MySQL op `127.0.0.1` staat op de server, zorg dan dat `DB_HOST=127.0.0.1` in je `.env` staat en gebruik `--network=host`. Draait MySQL op een andere host? Dan `--network=host` weglaten en de echte IP gebruiken.
+
 ## Performance
 
 - Batch inserts (2000 records/batch) instead of row-by-row
